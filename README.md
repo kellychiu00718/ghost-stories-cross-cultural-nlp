@@ -36,12 +36,12 @@ Posts were collected from public boards. The raw data is not in this repository,
 Python (pandas, scikit-learn, gensim, spaCy, jieba, KoNLPy/Kiwi, statsmodels, scipy), R (tidyverse, rmarkdown) for the statistics, the Anthropic API (Claude Haiku and Sonnet) for the fallback classifier.
 
 ## Process
-1. **Entity classification, a rule-based + LLM cascade.** A conservative rule-based classifier assigns gender from kinship terms, pronouns and gendered ghost words. Mentions without enough cues go to Claude Haiku with a ±2-sentence context, and to Claude Sonnet if Haiku is unsure.
-2. **State classification.** A hierarchical keyword search separates supernatural, deceased and living entities.
-3. **Validation.** A stratified human-labeled sample (precision, recall, F1, Cohen's kappa), McNemar's exact test between the rule-only and cascade versions, and an LLM-as-judge check.
-4. **Gender distribution.** Chi-square or Fisher tests with Cramér's V, at mention and article level.
-5. **Lexical association.** Dunning's log-likelihood ratio on content words around female and male ghosts, with Benjamini-Hochberg correction.
-6. **Themes.** Space, color and haunting method, checked against LDA topic models. Word2Vec neighborhoods of the key words, compared across platforms with Kruskal-Wallis and Wilcoxon tests.
+1. Entity classification, a rule-based + LLM cascade. A conservative rule-based classifier assigns gender from kinship terms, pronouns and gendered ghost words. Mentions without enough cues go to Claude Haiku with a ±2-sentence context, and to Claude Sonnet if Haiku is unsure.
+2. State classification. A hierarchical keyword search separates supernatural, deceased and living entities.
+3. Validation. A stratified human-labeled sample (precision, recall, F1, Cohen's kappa), McNemar's exact test between the rule-only and cascade versions, and an LLM-as-judge check.
+4. Gender distribution. Chi-square or Fisher tests with Cramér's V, at mention and article level.
+5. Lexical association. Dunning's log-likelihood ratio on content words around female and male ghosts, with Benjamini-Hochberg correction.
+6. Themes. Space, color and haunting method, checked against LDA topic models. Word2Vec neighborhoods of the key words, compared across platforms with Kruskal-Wallis and Wilcoxon tests.
 
 | Notebook | Content |
 |---|---|
@@ -66,7 +66,7 @@ Python (pandas, scikit-learn, gensim, spaCy, jieba, KoNLPy/Kiwi, statsmodels, sc
 This is academic research with no deployment, so there is no business result. The reusable part is the method: a cheap rule layer that handles clear cases, an LLM only for ambiguous ones, and a validation step that checks the combination. The cascade reached gender macro-F1 0.94 (kappa 0.93) and beat the rule-only version on McNemar's exact test (b = 36, c = 6, p < .001).
 
 ## Challenges and learnings
-- State classification is weaker (macro-F1 0.65, kappa 0.54). Whether a ghost is "deceased" or "supernatural" is often unclear in the text, and the LLM judge agreed with me less on it (kappa 0.33). I report this instead of hiding it.
+- State classification is weaker (macro-F1 0.65, kappa 0.54). Whether a ghost is "deceased" or "supernatural" is often unclear in the text, and the LLM judge agreed with me less on it (kappa 0.33).
 - Gendered words can make the analysis circular, so kinship terms and pronouns are removed from the LLR vocabulary.
 - Three languages need three tokenizers, and each choice shifts the counts. I aligned them and documented the choices.
 - Statistical significance and effect size told different stories (large samples, V near 0.10), so I describe the differences as real but small.
