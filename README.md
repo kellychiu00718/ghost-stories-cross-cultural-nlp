@@ -4,6 +4,14 @@ Master's thesis analysis code (KAIST Graduate School of Culture Technology, 2026
 
 The thesis PDF and the raw posts are not published. This repository holds the analysis code only.
 
+![Where female and male ghosts appear on PTT](figures/ptt_space_by_ghost_gender.png)
+*Normalized frequency of spaces in ghost stories on PTT, by ghost gender. Female ghosts lean toward sleep, dreams, bathrooms and windows; the one clearly male space is the military.*
+
+**In short**
+- 3 platforms, 3 languages: female ghosts are tied to bodies, homes and the senses; male ghosts to institutions and religion.
+- A rule-based + LLM cascade labels ghost gender at macro-F1 0.94 and beats the rules alone (McNemar exact test, p < .001).
+- Platform differences are real but modest (Cramér's V about 0.10).
+
 ## Problem
 Ghost stories are often told as personal experience, so they carry everyday ideas about who belongs where. I wanted to see whether the public/private split (women in domestic, bodily spaces; men in institutional ones) shows up in thousands of stories in three languages.
 
@@ -51,6 +59,8 @@ Python (pandas, scikit-learn, gensim, spaCy, jieba, KoNLPy/Kiwi, statsmodels, sc
 - TheQoo has few posts and 50.5% unknown-gender mentions, so its results are the least certain.
 
 ![Collocates by gender across three platforms](figures/collocate_LLR_divergence_3platforms_v5.png)
+
+![White and other colors by ghost gender on PTT](figures/ptt_color_by_ghost_gender.png)
 
 ## Business impact
 This is academic research with no deployment, so there is no business result. The reusable part is the method: a cheap rule layer that handles clear cases, an LLM only for ambiguous ones, and a validation step that checks the combination. The cascade reached gender macro-F1 0.94 (kappa 0.93) and beat the rule-only version on McNemar's exact test (b = 36, c = 6, p < .001).
