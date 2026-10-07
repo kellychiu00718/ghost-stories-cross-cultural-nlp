@@ -1,0 +1,1561 @@
+---
+title: "thesis_statistical_analysis"
+author: "chiu meng-yu"
+date: "2026-04-07"
+output: pdf_document
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{longtable}
+  - \usepackage{threeparttable}
+  - \usepackage{float}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+### 0. Setup
+
+```{r}
+library(tidyverse)
+library(effectsize)
+library(effsize)
+library(broom)
+library(knitr)
+library(kableExtra)
+library(irr)
+library(boot)
+library(caret)
+```
+
+### 1. Read data
+
+```{r}
+mentions_df <- read_csv(
+  "results/mentions_with_content_words.csv",
+  show_col_types = FALSE
+)
+```
+
+### 2. Helper functions
+
+```{r}
+pick_first_existing <- function(data, candidates) {
+  hit <- candidates[candidates %in% names(data)][1]
+  if (is.na(hit)) return(NULL)
+  hit
+}
+
+standardize_main_columns <- function(data) {
+  gender_col <- pick_first_existing(data, c("gender_new", "gender_cascade", "cascade_gender"))
+  state_col  <- pick_first_existing(data, c("state_new", "state_cascade", "cascade_state"))
+
+  if (!is.null(gender_col) && gender_col != "gender_new") {
+    data <- data %>% rename(gender_new = all_of(gender_col))
+  }
+  if (!is.null(state_col) && state_col != "state_new") {
+    data <- data %>% rename(state_new = all_of(state_col))
+  }
+
+  data
+}
+
+# Cohen's d with pooled standard deviation (standard textbook formula).
+cohens_d_pooled <- function(a, b) {
+  a <- a[!is.na(a)]
+  b <- b[!is.na(b)]
+
+  n1 <- length(a)
+  n2 <- length(b)
+  s1 <- sd(a)
+  s2 <- sd(b)
+
+  pooled <- sqrt(((n1 - 1) * s1^2 + (n2 - 1) * s2^2) / (n1 + n2 - 2))
+  if (is.na(pooled) || pooled == 0) return(0)
+
+  (mean(a) - mean(b)) / pooled
+}
+
+# Bootstrap 95% CI for Cohen's d (percentile method, B=2000).
+bootstrap_cohens_d_ci <- function(a, b, R = 2000, seed = 42) {
+  set.seed(seed)
+  a <- a[!is.na(a)]
+  b <- b[!is.na(b)]
+
+  point <- cohens_d_pooled(a, b)
+
+  boots <- replicate(R, {
+    a_star <- sample(a, length(a), replace = TRUE)
+    b_star <- sample(b, length(b), replace = TRUE)
+    cohens_d_pooled(a_star, b_star)
+  })
+
+  ci <- quantile(boots, c(0.025, 0.975), na.rm = TRUE)
+  c(d = point, ci_low = unname(ci[1]), ci_high = unname(ci[2]))
+}
+
+p_to_stars <- function(p) {
+  case_when(
+    is.na(p) ~ "",
+    p < 0.001 ~ "***",
+    p < 0.01  ~ "**",
+    p < 0.05  ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+# Macro-F1 computed from scratch (sklearn-style: per-class F1 then average).
+macro_f1_sklearn_style <- function(truth, pred, labels) {
+  truth <- as.character(truth)
+  pred  <- as.character(pred)
+
+  f1s <- sapply(labels, function(lbl) {
+    tp <- sum(truth == lbl & pred == lbl, na.rm = TRUE)
+    fp <- sum(truth != lbl & pred == lbl, na.rm = TRUE)
+    fn <- sum(truth == lbl & pred != lbl, na.rm = TRUE)
+
+    precision <- ifelse(tp + fp == 0, 0, tp / (tp + fp))
+    recall    <- ifelse(tp + fn == 0, 0, tp / (tp + fn))
+
+    if ((precision + recall) == 0) 0
+    else 2 * precision * recall / (precision + recall)
+  })
+
+  mean(f1s)
+}
+
+bootstrap_macro_f1_exact <- function(data, truth_col, pred_col, labels,
+                                     R = 1000, seed = 42) {
+  set.seed(seed)
+
+  truth <- data[[truth_col]]
+  pred  <- data[[pred_col]]
+  n <- length(truth)
+
+  point <- macro_f1_sklearn_style(truth, pred, labels)
+
+  boots <- replicate(R, {
+    idx <- sample.int(n, size = n, replace = TRUE)
+    macro_f1_sklearn_style(truth[idx], pred[idx], labels)
+  })
+
+  tibble(
+    estimate = point,
+    ci_low   = unname(quantile(boots, 0.025, na.rm = TRUE)),
+    ci_high  = unname(quantile(boots, 0.975, na.rm = TRUE))
+  )
+}
+
+pretty_p <- function(p) {
+  case_when(
+    is.na(p)      ~ "",
+    p < 0.001     ~ "< .001",
+    TRUE          ~ sprintf("%.3f", p)
+  )
+}
+```
+
+### 3. Standardize columns
+
+```{r}
+mentions_df <- standardize_main_columns(mentions_df)
+```
+
+### 4. Ghost gender distribution: Chi-square + Cramer's V
+
+#### 4.1 Mention-level
+
+```{r}
+ghosts <- mentions_df %>%
+  filter(state_new == "Supernatural",
+         gender_new %in% c("Female", "Male"),
+         !is.na(platform))
+
+ct_mention <- table(ghosts$platform, ghosts$gender_new)
+
+chisq_mention  <- chisq.test(ct_mention)
+cramer_mention <- effectsize::cramers_v(ct_mention)
+expected_min_mention <- min(chisq_mention$expected)
+
+if (expected_min_mention < 5) {
+  message("  ⚠ Mention-level: expected frequency < 5 (min = ",
+          round(expected_min_mention, 2),
+          ") — using Fisher's exact test as fallback.")
+  fisher_mention <- fisher.test(ct_mention, simulate.p.value = TRUE, B = 10000)
+  mention_result <- tibble(
+    level     = "mention (Fisher)",
+    chi2      = NA_real_,
+    df        = NA_real_,
+    p_value   = fisher_mention$p.value,
+    cramers_v = cramer_mention$Cramers_v[1]
+  )
+} else {
+  mention_result <- tibble(
+    level     = "mention",
+    chi2      = unname(chisq_mention$statistic),
+    df        = unname(chisq_mention$parameter),
+    p_value   = chisq_mention$p.value,
+    cramers_v = cramer_mention$Cramers_v[1]
+  )
+}
+
+mention_result
+```
+
+#### 4.2 Article-level robustness
+
+```{r}
+article_result <- NULL
+
+if ("article_id" %in% names(ghosts)) {
+  ghosts_article <- ghosts %>%
+    distinct(article_id, gender_new, .keep_all = TRUE)
+
+  ct_article <- table(ghosts_article$platform, ghosts_article$gender_new)
+
+  # Check expected cell counts (cf. space_color notebook approach)
+  chisq_article  <- chisq.test(ct_article)
+  expected_min   <- min(chisq_article$expected)
+
+  if (expected_min < 5) {
+    message("  ⚠ Expected frequency < 5 in some cells (min = ",
+            round(expected_min, 2),
+            ") — using Fisher's exact test as fallback.")
+    fisher_article <- fisher.test(ct_article, simulate.p.value = TRUE, B = 10000)
+    article_result <- tibble(
+      level     = "article (Fisher)",
+      chi2      = NA_real_,
+      df        = NA_real_,
+      p_value   = fisher_article$p.value,
+      cramers_v = effectsize::cramers_v(ct_article)$Cramers_v[1]
+    )
+  } else {
+    cramer_article <- effectsize::cramers_v(ct_article)
+    article_result <- tibble(
+      level     = "article",
+      chi2      = unname(chisq_article$statistic),
+      df        = unname(chisq_article$parameter),
+      p_value   = chisq_article$p.value,
+      cramers_v = cramer_article$Cramers_v[1]
+    )
+  }
+
+  ct_article
+  article_result
+}
+```
+
+#### 4.3 Latex
+
+```{r results='asis'}
+tab_43 <- bind_rows(mention_result, article_result) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+cat(
+  kbl(tab_43,
+      format    = "latex",
+      booktabs  = TRUE,
+      caption   = "Ghost gender distribution across platforms (Fisher's exact test used when expected count $< 5$).",
+      col.names = c("Level", "$\\chi^2$", "df", "$p$", "Cram\\'{e}r's $V$"),
+      escape    = FALSE
+  ) %>%
+    kable_styling(latex_options = c("hold_position"))
+)
+```
+
+### 5. LLR + raw p + BH-FDR + log odds ratio CI
+
+```{r}
+llr_ptt    <- read_csv("results/collocate_LLR_ptt.csv",    show_col_types = FALSE)
+llr_reddit <- read_csv("results/collocate_LLR_reddit.csv",  show_col_types = FALSE)
+llr_theqoo <- read_csv("results/collocate_LLR_theqoo.csv",  show_col_types = FALSE)
+```
+
+```{r}
+llr_all <- bind_rows(
+  llr_ptt    %>% mutate(platform = "PTT"),
+  llr_reddit %>% mutate(platform = "Reddit"),
+  llr_theqoo %>% mutate(platform = "TheQoo")
+)
+
+llr_all_fmt <- llr_all %>%
+  mutate(word_sig = paste0(word, sig_fdr))
+
+llr_top10 <- llr_all_fmt %>%
+  filter(direction %in% c("Female", "Male")) %>%
+  mutate(
+    direction = recode(direction,
+                       "Female" = "Female ghosts",
+                       "Male"   = "Male ghosts")
+  ) %>%
+  group_by(platform, direction) %>%
+  arrange(desc(abs(LLR)), .by_group = TRUE) %>%
+  slice_head(n = 10) %>%
+  summarise(
+    `top-10 words` = paste(word_sig, collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  rename(`related gendered ghost` = direction) %>%
+  arrange(platform, `related gendered ghost`)
+
+llr_top10
+```
+
+```{r}
+cat(
+  llr_top10 %>%
+    kbl(
+      format    = "latex",
+      booktabs  = TRUE,
+      align     = c("l", "l", "l"),   
+      col.names = c("Platform", "Related Gendered Ghost", "Top-10 Words"),
+      caption   = "Top 10 gendered collocates by platform based on signed log-likelihood ratio (LLR)."
+    ) %>%
+    kable_styling(latex_options = c("hold_position")) %>%  
+    column_spec(3, width = "10cm") %>%                      # 控制寬度
+    footnote(
+      general        = "*** $p < .001$, ** $p < .01$, * $p < .05$ (BH-FDR adjusted).",
+      threeparttable = TRUE,
+      escape         = FALSE
+    )
+)
+```
+
+### 6. Affect score comparison: Welch t-test + Cohen's d + Bonferroni
+
+```{r}
+affect_cols <- c("val_pos", "val_neg", "val_revenge")
+platforms   <- c("ptt", "reddit", "theqoo")
+
+ghosts_known <- mentions_df %>%
+  filter(state_new == "Supernatural",
+         gender_new %in% c("Female", "Male"))
+
+run_affect_test <- function(data, platform_name, varname) {
+  sub <- data %>% filter(platform == platform_name)
+
+  fa <- sub %>% filter(gender_new == "Female") %>% pull(all_of(varname))
+  ma <- sub %>% filter(gender_new == "Male")   %>% pull(all_of(varname))
+
+  fa <- fa[!is.na(fa)]
+  ma <- ma[!is.na(ma)]
+
+  if (length(fa) < 5 || length(ma) < 5) return(NULL)
+
+  tt    <- t.test(fa, ma, var.equal = FALSE)
+  d_ci  <- bootstrap_cohens_d_ci(fa, ma)
+
+  tibble(
+    Platform    = platform_name,
+    Metric      = varname,
+    Female_n    = length(fa),
+    Male_n      = length(ma),
+    Female_mean = mean(fa),
+    Male_mean   = mean(ma),
+    t           = unname(tt$statistic),
+    df          = unname(tt$parameter),
+    p           = tt$p.value,
+    cohens_d    = d_ci["d"],
+    d_ci_low    = d_ci["ci_low"],
+    d_ci_high   = d_ci["ci_high"]
+  )
+}
+
+sent_df <- map_dfr(platforms, function(plat) {
+  map_dfr(affect_cols, function(col) run_affect_test(ghosts_known, plat, col))
+}) %>%
+  mutate(
+    p_adj    = p.adjust(p, method = "bonferroni"),
+    sig_adj  = p_to_stars(p_adj),
+    reject_H0 = p_adj < 0.05
+  )
+
+sent_df
+```
+
+```{r results='asis'}
+cat(
+  sent_df %>%
+    mutate(
+      d_ci = paste0("[", round(d_ci_low, 3), ", ", round(d_ci_high, 3), "]"),
+      across(where(is.numeric), ~round(., 4))
+    ) %>%
+    select(Platform, Metric, Female_n, Male_n,
+           Female_mean, Male_mean, t, df, p, p_adj,
+           cohens_d, d_ci, sig_adj) %>%
+    kbl(format   = "latex",
+        booktabs = TRUE,
+        caption  = "Welch $t$-tests comparing female and male ghost affect scores across platforms (Bonferroni-adjusted).",
+        col.names = c("Platform", "Metric", "$n_F$", "$n_M$",
+                       "$\\bar{x}_F$", "$\\bar{x}_M$",
+                       "$t$", "df", "$p$", "$p_{adj}$",
+                       "Cohen's $d$", "95\\% CI", "Sig."),
+        escape   = FALSE
+    ) %>%
+    kable_styling(latex_options = c("hold_position", "scale_down")) %>%
+    footnote(
+      general        = "Cohen's $d$ 95\\% CI computed via bootstrap (B = 2,000, seed = 42).",
+      threeparttable = TRUE,
+      escape         = FALSE
+    )
+)
+```
+
+### 7. Appeasement / euphemism chi-square
+
+```{r}
+# Reuse the already-loaded and standardized mentions_df (no need to re-read CSV).
+appeasement_lexicon <- c(
+  # Chinese
+  "好兄弟", "不好意思", "請原諒", "對不起", "抱歉", "失禮", "無意冒犯",
+  "保佑", "別見怪", "請息怒", "請高抬貴手", "拍謝", "超度", "金紙", "送走",
+  "謝謝", "念佛", "超渡", "有應公", "萬善公", "感謝", "請走", "念經",
+
+  # Korean
+  "죄송", "미안", "용서", "화 풀", "실례", "괜찮으시면", "제발",
+  "용서해", "화내지", "노하지", "살려주세요", "위령", "달래", "부탁",
+  "감사", "무사히", "위로", "기도", "천도", "고사", "제물", "저승", "부디",
+  "명복", "편히", "보살펴", "달래다", "49재", "천도재", "달래주다", "내세", "영계",
+
+  # English
+  "sorry", "forgive", "forgive me", "please don't", "please do not",
+  "no offense", "i mean no harm", "spare me", "please", "pardon me",
+  "leave me alone", "rest in peace", "bless", "appease", "offering", "pray",
+  "protect", "go away", "pass away", "apologize", "thank you", "i respect",
+  "i apologize", "peace be with", "spirit world", "afterlife", "respect",
+  "condolences", "sympathize", "spirit realm"
+)
+```
+
+```{r}
+escape_regex <- function(x) {
+  str_replace_all(x, "([.|()\\^{}+$*?]|\\[|\\]|\\\\)", "\\\\\\1")
+}
+
+appeasement_pattern <- appeasement_lexicon %>%
+  escape_regex() %>%
+  str_c(collapse = "|")
+
+mentions_df <- mentions_df %>%
+  mutate(
+    has_appeasement = as.integer(
+      str_detect(sentence, regex(appeasement_pattern, ignore_case = TRUE))
+    ),
+    has_appeasement = replace_na(has_appeasement, 0L)
+  )
+```
+
+```{r}
+run_appeasement_chisq <- function(data, platform_name) {
+  sub <- data %>%
+    filter(
+      platform == platform_name,
+      gender_new %in% c("Female", "Male"),
+      !is.na(has_appeasement)
+    )
+
+  if (!all(c("Female", "Male") %in% unique(sub$gender_new))) return(NULL)
+
+  ct <- table(sub$gender_new, sub$has_appeasement)
+  if (nrow(ct) != 2 || ncol(ct) != 2) return(NULL)
+  if (!("1" %in% colnames(ct)))       return(NULL)
+  if (sum(ct[, "1"]) == 0)            return(NULL)
+
+  test  <- chisq.test(ct, correct = TRUE)
+  cv    <- effectsize::cramers_v(ct)
+  expected_min <- min(test$expected)
+
+  # Fisher fallback when expected counts are too small (cf. space_color)
+  if (expected_min < 5) {
+    fisher_res <- fisher.test(ct)
+    tibble(
+      platform    = platform_name,
+      chi2        = NA_real_,
+      df          = NA_real_,
+      p_value     = fisher_res$p.value,
+      cramers_v   = cv$Cramers_v[1],
+      test_used   = "Fisher",
+      expected_min = expected_min
+    )
+  } else {
+    tibble(
+      platform    = platform_name,
+      chi2        = unname(test$statistic),
+      df          = unname(test$parameter),
+      p_value     = test$p.value,
+      cramers_v   = cv$Cramers_v[1],
+      test_used   = "Chi-square",
+      expected_min = expected_min
+    )
+  }
+}
+
+appeasement_results <- map_dfr(
+  c("ptt", "reddit", "theqoo"),
+  ~run_appeasement_chisq(mentions_df, .x)
+)
+
+appeasement_results
+```
+
+```{r results='asis'}
+cat(
+  appeasement_results %>%
+    mutate(
+      sig = p_to_stars(p_value),
+      across(where(is.numeric), ~round(., 4))
+    ) %>%
+    select(platform, test_used, chi2, df, p_value, cramers_v, sig) %>%
+    kbl(format   = "latex",
+        booktabs = TRUE,
+        caption  = "Appeasement/euphemism rates by ghost gender (Fisher's exact test used when expected count $< 5$).",
+        col.names = c("Platform", "Test", "$\\chi^2$", "df", "$p$", "Cram\\'{e}r's $V$", "Sig."),
+        escape   = FALSE
+    ) %>%
+    kable_styling(latex_options = c("hold_position"))
+)
+```
+
+### 8. Classification metrics + Cohen's kappa
+
+Unknown is included as a full class in all evaluation metrics. Excluding Unknown would silently drop false positives where the system confidently predicts Female/Male on truly ambiguous examples, inflating reported performance. Cohen's κ already includes Unknown; P/R/F1, McNemar, and bootstrap CI now do the same for consistency.
+
+```{r}
+completed <- read_csv(
+  "results/annotation_task_completed_with_methods.csv",
+  show_col_types = FALSE
+)
+completed <- completed %>% rename_with(str_trim)
+
+# All labels including Unknown — used for ALL evaluation metrics
+valid_gender <- c("Female", "Male", "Unknown")
+valid_state  <- c("Alive", "Deceased", "Supernatural", "Unknown")
+```
+
+#### 8.1 Helper
+
+```{r}
+get_classification_metrics_exact <- function(truth, pred, labels) {
+  truth <- factor(truth, levels = labels)
+  pred  <- factor(pred,  levels = labels)
+
+  cm      <- confusionMatrix(pred, truth)
+  byclass <- cm$byClass
+
+  if (is.null(dim(byclass))) {
+    tibble(
+      class     = labels[1],
+      precision = unname(byclass["Pos Pred Value"]),
+      recall    = unname(byclass["Sensitivity"]),
+      f1        = unname(byclass["F1"])
+    )
+  } else {
+    tibble(
+      class     = str_remove(rownames(byclass), "^Class:\\s*"),
+      precision = byclass[, "Pos Pred Value"],
+      recall    = byclass[, "Sensitivity"],
+      f1        = byclass[, "F1"]
+    )
+  }
+}
+```
+
+#### 8.2 Gender metrics
+
+```{r}
+g_df <- completed %>% filter(human_gender %in% valid_gender)
+
+gender_rb_metrics <- get_classification_metrics_exact(
+  truth  = g_df$human_gender,
+  pred   = replace_na(g_df$rb_gender, "Unknown"),
+  labels = valid_gender
+) %>% mutate(model = "Rule-Based", task = "Gender")
+
+gender_cs_metrics <- get_classification_metrics_exact(
+  truth  = g_df$human_gender,
+  pred   = replace_na(g_df$cascade_gender, "Unknown"),
+  labels = valid_gender
+) %>% mutate(model = "Cascade", task = "Gender")
+
+gender_kappa <- tibble(
+  task  = "Gender",
+  model = c("Rule-Based", "Cascade"),
+  kappa = c(
+    irr::kappa2(data.frame(
+      truth = factor(g_df$human_gender, levels = valid_gender),
+      pred  = factor(replace_na(g_df$rb_gender, "Unknown"), levels = valid_gender)
+    ))$value,
+    irr::kappa2(data.frame(
+      truth = factor(g_df$human_gender, levels = valid_gender),
+      pred  = factor(replace_na(g_df$cascade_gender, "Unknown"), levels = valid_gender)
+    ))$value
+  )
+)
+```
+
+#### 8.3 State metrics
+
+```{r}
+s_df <- completed %>% filter(human_state %in% valid_state)
+
+state_rb_metrics <- get_classification_metrics_exact(
+  truth  = s_df$human_state,
+  pred   = replace_na(s_df$rb_state, "Unknown"),
+  labels = valid_state
+) %>% mutate(model = "Rule-Based", task = "State")
+
+state_cs_metrics <- get_classification_metrics_exact(
+  truth  = s_df$human_state,
+  pred   = replace_na(s_df$cascade_state, "Unknown"),
+  labels = valid_state
+) %>% mutate(model = "Cascade", task = "State")
+
+state_kappa <- tibble(
+  task  = "State",
+  model = c("Rule-Based", "Cascade"),
+  kappa = c(
+    irr::kappa2(data.frame(
+      truth = factor(s_df$human_state, levels = valid_state),
+      pred  = factor(replace_na(s_df$rb_state, "Unknown"), levels = valid_state)
+    ))$value,
+    irr::kappa2(data.frame(
+      truth = factor(s_df$human_state, levels = valid_state),
+      pred  = factor(replace_na(s_df$cascade_state, "Unknown"), levels = valid_state)
+    ))$value
+  )
+)
+```
+
+#### 8.4 Macro-F1
+
+```{r}
+# Compute macro-F1 for every task × model using the sklearn-style helper
+macro_f1_section8 <- tibble(
+  task  = c("Gender", "Gender", "State", "State"),
+  model = c("Rule-Based", "Cascade", "Rule-Based", "Cascade"),
+  macro_f1 = c(
+    macro_f1_sklearn_style(g_df$human_gender,
+                           replace_na(g_df$rb_gender, "Unknown"),      valid_gender),
+    macro_f1_sklearn_style(g_df$human_gender,
+                           replace_na(g_df$cascade_gender, "Unknown"), valid_gender),
+    macro_f1_sklearn_style(s_df$human_state,
+                           replace_na(s_df$rb_state, "Unknown"),      valid_state),
+    macro_f1_sklearn_style(s_df$human_state,
+                           replace_na(s_df$cascade_state, "Unknown"), valid_state)
+  )
+)
+```
+
+#### 8.5 LaTeX — Per-class metrics
+
+```{r results='asis'}
+all_metrics <- bind_rows(
+  gender_rb_metrics, gender_cs_metrics,
+  state_rb_metrics,  state_cs_metrics
+) %>%
+  select(task, model, class, precision, recall, f1) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+cat(
+  kbl(all_metrics,
+      format    = "latex",
+      booktabs  = TRUE,
+      caption   = "Per-class precision, recall, and F1 for gender and state classification (all labels including Unknown).",
+      col.names = c("Task", "Model", "Class", "Precision", "Recall", "F1"),
+      escape    = FALSE
+  ) %>%
+    kable_styling(latex_options = c("hold_position")) %>%
+    collapse_rows(columns = 1:2, valign = "top", latex_hline = "major")
+)
+```
+
+#### 8.6 LaTeX — Macro-F1 + Cohen's κ
+
+```{r results='asis'}
+all_kappa <- bind_rows(gender_kappa, state_kappa)
+
+summary_section8 <- all_kappa %>%
+  left_join(macro_f1_section8, by = c("task", "model")) %>%
+  select(task, model, macro_f1, kappa) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+cat(
+  kbl(summary_section8,
+      format    = "latex",
+      booktabs  = TRUE,
+      caption   = "Macro-F1 and Cohen's $\\kappa$ for gender and state classification (all labels including Unknown).",
+      col.names = c("Task", "Model", "Macro-F1", "$\\kappa$"),
+      escape    = FALSE
+  ) %>%
+    kable_styling(latex_options = c("hold_position"))
+)
+```
+
+### 9. Exact McNemar + bootstrap 95% CI
+
+#### 9.1 McNemar
+
+```{r}
+run_exact_mcnemar <- function(data, truth_col, rb_col, cs_col,
+                              valid_labels, task_name) {
+  df_t <- data %>% filter(.data[[truth_col]] %in% valid_labels)
+
+  ytrue <- df_t[[truth_col]]
+  yrb   <- replace_na(df_t[[rb_col]], "Unknown")
+  ycs   <- replace_na(df_t[[cs_col]], "Unknown")
+
+  rb_correct <- yrb == ytrue
+  cs_correct <- ycs == ytrue
+
+  b <- sum((!rb_correct) & cs_correct, na.rm = TRUE)
+  c_val <- sum(rb_correct & (!cs_correct), na.rm = TRUE)
+
+  discordant <- b + c_val
+
+  if (discordant == 0) {
+    p_val <- 1
+  } else {
+    p_val <- stats::binom.test(
+      x           = min(b, c_val),
+      n           = discordant,
+      p           = 0.5,
+      alternative = "two.sided"
+    )$p.value
+  }
+
+  tibble(
+    task    = task_name,
+    b       = b,
+    c       = c_val,
+    p_value = p_val
+  )
+}
+
+mcn_gender <- run_exact_mcnemar(
+  completed,
+  truth_col    = "human_gender",
+  rb_col       = "rb_gender",
+  cs_col       = "cascade_gender",
+  valid_labels = valid_gender,
+  task_name    = "Gender"
+)
+
+mcn_state <- run_exact_mcnemar(
+  completed,
+  truth_col    = "human_state",
+  rb_col       = "rb_state",
+  cs_col       = "cascade_state",
+  valid_labels = valid_state,
+  task_name    = "State"
+)
+
+bind_rows(mcn_gender, mcn_state)
+```
+
+#### 9.2 Bootstrap macro-F1 CI
+
+```{r}
+gender_boot <- completed %>%
+  filter(human_gender %in% valid_gender) %>%
+  mutate(
+    rb_gender      = replace_na(rb_gender, "Unknown"),
+    cascade_gender = replace_na(cascade_gender, "Unknown")
+  )
+
+gender_rb_ci <- bootstrap_macro_f1_exact(
+  gender_boot,
+  truth_col = "human_gender",
+  pred_col  = "rb_gender",
+  labels    = valid_gender
+) %>% mutate(task = "Gender", model = "Rule-Based")
+
+gender_cs_ci <- bootstrap_macro_f1_exact(
+  gender_boot,
+  truth_col = "human_gender",
+  pred_col  = "cascade_gender",
+  labels    = valid_gender
+) %>% mutate(task = "Gender", model = "Cascade")
+
+state_boot <- completed %>%
+  filter(human_state %in% valid_state) %>%
+  mutate(
+    rb_state      = replace_na(rb_state, "Unknown"),
+    cascade_state = replace_na(cascade_state, "Unknown")
+  )
+
+state_rb_ci <- bootstrap_macro_f1_exact(
+  state_boot,
+  truth_col = "human_state",
+  pred_col  = "rb_state",
+  labels    = valid_state
+) %>% mutate(task = "State", model = "Rule-Based")
+
+state_cs_ci <- bootstrap_macro_f1_exact(
+  state_boot,
+  truth_col = "human_state",
+  pred_col  = "cascade_state",
+  labels    = valid_state
+) %>% mutate(task = "State", model = "Cascade")
+
+boot_ci_all <- bind_rows(gender_rb_ci, gender_cs_ci, state_rb_ci, state_cs_ci)
+boot_ci_all
+```
+
+#### 9.3 LaTeX
+
+```{r results='asis'}
+cat(
+  bind_rows(mcn_gender, mcn_state) %>%
+    mutate(
+      sig = p_to_stars(p_value),
+      across(where(is.numeric), ~round(., 4))
+    ) %>%
+    kbl(format    = "latex",
+        booktabs  = TRUE,
+        caption   = "Exact McNemar tests comparing rule-based and cascade systems.",
+        col.names = c("Task", "$b$", "$c$", "$p$", "Sig."),
+        escape    = FALSE
+    ) %>%
+    kable_styling(latex_options = c("hold_position"))
+)
+```
+
+```{r results='asis'}
+cat(
+  boot_ci_all %>%
+    select(task, model, estimate, ci_low, ci_high) %>%
+    mutate(across(where(is.numeric), ~round(., 4))) %>%
+    kbl(format    = "latex",
+        booktabs  = TRUE,
+        caption   = "Bootstrap 95\\% confidence intervals for macro-F1.",
+        col.names = c("Task", "Model", "Macro-F1", "CI Low", "CI High"),
+        escape    = FALSE
+    ) %>%
+    kable_styling(latex_options = c("hold_position"))
+)
+```
+
+### 10. LLM-as-Judge supplementary metrics
+
+```{r}
+judge_df <- read_csv(
+  "results/llm_as_judge_results.csv",
+  show_col_types = FALSE
+)
+
+judge_gender <- judge_df %>%
+  filter(gold_gender_sonnet %in% valid_gender) %>%
+  mutate(
+    gold_gender_sonnet = factor(replace_na(gold_gender_sonnet, "Unknown"), levels = valid_gender),
+    gender_cascade     = factor(replace_na(gender_cascade, "Unknown"),     levels = valid_gender)
+  )
+
+judge_gender_metrics <- get_classification_metrics_exact(
+  truth  = judge_gender$gold_gender_sonnet,
+  pred   = judge_gender$gender_cascade,
+  labels = valid_gender
+) %>% mutate(task = "Gender", model = "Cascade vs Sonnet")
+
+judge_state <- judge_df %>%
+  filter(gold_state_sonnet %in% valid_state) %>%
+  mutate(
+    gold_state_sonnet = factor(replace_na(gold_state_sonnet, "Unknown"), levels = valid_state),
+    state_cascade     = factor(replace_na(state_cascade, "Unknown"),     levels = valid_state)
+  )
+
+judge_state_metrics <- get_classification_metrics_exact(
+  truth  = judge_state$gold_state_sonnet,
+  pred   = judge_state$state_cascade,
+  labels = valid_state
+) %>% mutate(task = "State", model = "Cascade vs Sonnet")
+
+judge_kappa <- tibble(
+  task  = c("Gender", "State"),
+  model = c("Cascade vs Sonnet", "Cascade vs Sonnet"),
+  kappa = c(
+    kappa2(data.frame(
+      rater1 = as.character(judge_gender$gold_gender_sonnet),
+      rater2 = as.character(judge_gender$gender_cascade)
+    ))$value,
+    kappa2(data.frame(
+      rater1 = as.character(judge_state$gold_state_sonnet),
+      rater2 = as.character(judge_state$state_cascade)
+    ))$value
+  )
+)
+
+# Macro-F1 point estimate
+judge_macro_f1 <- tibble(
+  task  = c("Gender", "State"),
+  model = c("Cascade vs Sonnet", "Cascade vs Sonnet"),
+  macro_f1 = c(
+    macro_f1_sklearn_style(
+      as.character(judge_gender$gold_gender_sonnet),
+      as.character(judge_gender$gender_cascade),
+      valid_gender),
+    macro_f1_sklearn_style(
+      as.character(judge_state$gold_state_sonnet),
+      as.character(judge_state$state_cascade),
+      valid_state)
+  )
+)
+
+# Bootstrap 95% CI for macro-F1
+judge_gender_df <- tibble(
+  truth = as.character(judge_gender$gold_gender_sonnet),
+  pred  = as.character(judge_gender$gender_cascade)
+)
+judge_state_df <- tibble(
+  truth = as.character(judge_state$gold_state_sonnet),
+  pred  = as.character(judge_state$state_cascade)
+)
+
+judge_gender_ci <- bootstrap_macro_f1_exact(
+  judge_gender_df, "truth", "pred", valid_gender
+) %>% mutate(task = "Gender", model = "Cascade vs Sonnet")
+
+judge_state_ci <- bootstrap_macro_f1_exact(
+  judge_state_df, "truth", "pred", valid_state
+) %>% mutate(task = "State", model = "Cascade vs Sonnet")
+
+judge_boot_ci <- bind_rows(judge_gender_ci, judge_state_ci)
+```
+
+```{r results='asis'}
+judge_all_metrics <- bind_rows(judge_gender_metrics, judge_state_metrics) %>%
+  select(task, model, class, precision, recall, f1) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+cat(
+  kbl(judge_all_metrics,
+      format    = "latex",
+      booktabs  = TRUE,
+      caption   = "LLM-as-Judge: per-class metrics, cascade system vs.\\ Sonnet gold labels.",
+      col.names = c("Task", "Model", "Class", "Precision", "Recall", "F1"),
+      escape    = FALSE
+  ) %>%
+    kable_styling(latex_options = c("hold_position")) %>%
+    collapse_rows(columns = 1:2, valign = "top", latex_hline = "major")
+)
+```
+
+```{r results='asis'}
+judge_summary <- judge_kappa %>%
+  left_join(judge_macro_f1, by = c("task", "model")) %>%
+  left_join(
+    judge_boot_ci %>% select(task, model, ci_low, ci_high),
+    by = c("task", "model")
+  ) %>%
+  select(task, model, macro_f1, ci_low, ci_high, kappa) %>%
+  mutate(across(where(is.numeric), ~round(., 4)))
+
+cat(
+  kbl(judge_summary,
+      format    = "latex",
+      booktabs  = TRUE,
+      caption   = "LLM-as-Judge summary: macro-F1 (with bootstrap 95\\% CI) and Cohen's $\\kappa$.",
+      col.names = c("Task", "Model", "Macro-F1", "CI Low", "CI High", "$\\kappa$"),
+      escape    = FALSE
+  ) %>%
+    kable_styling(latex_options = c("hold_position"))
+)
+```
+
+### 11. Per-category article-level Fisher / Chi-square tests (Space · Color · Haunting Method)
+
+Replicates the article-level statistical tests from the `space_color_haunted_method` notebook: for each category within each platform, builds a 2×2 contingency table (Female hits / no-hit vs Male hits / no-hit) and applies chi-square with Fisher's exact test fallback when any expected cell count \< 5.
+
+#### 11.1 Keyword dictionaries
+
+```{r}
+# ── SPACE ─────────────────────────────────────────────────────────────────────
+space_groups <- list(
+  ptt = list(
+    `Indoor (Domestic)` = c('房間', '房門','廚房','臥房','阿太房','空房','病房',
+                    '客房','房屋','暗房','樓房','新房子','雅房','大房子','書房',
+                    '小房','平房','套房','茅房','小書房','睡房','老房子','房子','大樓',
+                    '閣樓','儲藏室','和室','休息室','山莊',
+                    '紅眠床','大床','病床','彈簧床','床位','床沿','床邊'),
+    Sleep_Dream = c('常夢','夢見','鄰居托夢','時托夢','夢境','入夢','夢到那','夢到','噩夢',
+      '惡夢','實夢','夢中聞','夢鄉','夢話','夢樂透','做夢','作夢','托夢','夢醒',
+      '夢過','姊托夢','夢遊','夢魘','睡著','睡醒','睡覺','午睡','睡到',
+      '晚睡','熟睡','睡眠','昏睡','睡意','半睡半醒','睡死','打瞌睡','入睡'),
+    Bathroom   = c('廁所'),
+    Window     = c('窗戶','窗簾','落地窗','氣窗','紙窗','窗台','玻璃窗','門窗','車窗',
+      '紗窗','小窗','外窗','櫥窗','鐵窗'),
+    Hallway    = c('走廊','黑長廊','長廊'),
+    Stairs     = c('樓梯角','樓梯口','樓梯'),
+    School     = c('學校','教室','宿舍','女生宿舍','男生宿舍','校園','夜校','校舍','住校',
+      '研究室','實驗室','大學','小學','中學','宿營','研究所'),
+    Outdoor    = c('金寶山','柏油路','車站','岔路','公路','小路','巡山','騎樓','佛光山','登山','金山',
+      '高山','山徑','武山','濱海','霞海','南海','海灘','斑馬線','黑森林','教會','墓地',
+      '墳墓區','墳墓','墓園','捷運站','車道','車場','公園','廟口','妻廟','祖師廟',
+      '桃園大廟','古廟','公廟','廟寺','大廟'),
+    `Military Setting` = c('部隊','查房','巡房','軍械室','國軍','軍區','軍卡車',
+                     '美軍','軍方','軍隊','軍艦','軍機','軍工','行軍','軍校','軍旅','海軍',
+                     '日軍','軍徽','單位','兵部','指揮部','旅部','營部',
+                     '全營','營舍','營區','摸哨','哨站','站哨','撤哨','哨屋',
+                     '接哨','上哨','下哨','外哨','哨點','哨所','內務櫃','戰車','甲車','碉堡')
+  ),
+  theqoo = list(
+    `Indoor (Domestic)` = c('안방','침대','주방','방바닥','거실','독실','창고','숙소'),
+    Sleep_Dream = c('꿈꾸','꿈속','잠들','잠결','잠자','낮잠'),
+    Bathroom    = c('화장실'),
+    Window      = c('창문','창가','창호지'),
+    Hallway     = c('복도','현관'),
+    Stairs      = c('계단'),
+    School      = c('고등학교','교실','강의실','학교','초등학교','기숙사','대학'),
+    Outdoor     = c('숲','무덤','강원도','횡단보도','산길','사거리','뒷산',
+      '첩첩산중','교회','지하철','공원'),
+    `Military Setting` = c('중대','대대장','부대','초소','행보관')
+  ),
+  reddit = list(
+    `Indoor (Domestic)` = c('room', 'bedroom', 'kitchen','house','playroom','storeroom',
+                    'living room','livingroom','sunroom','guesthouse',
+                    'warehouse','haunted house','townhouse','farmhouse','coachhouse',
+                    'abandoned house','bedside'),
+    Sleep_Dream = c('dream','sleep paralysis','asleep','dreamed','dreaming','half-asleep',
+      'sleeper','sleepwalking','sleeping','half asleep','sleep','sleepwalk'),
+    Bathroom    = c('bathroom','restroom','washroom','toilet'),
+    Window      = c('window','windowsill'),
+    Hallway     = c('hallway','corridor','hall','aisle','passage'),
+    Stairs      = c('stair','stairwell','staircase','downstairs','upstairs','downstair','stairs'),
+    School      = c('abandoned school','highschool','school','preschool',
+      'classroom','dormitory','dorm','elementary'),
+    Outdoor     = c('church','ballroom','shophouse','lighthouse','dirtroad','roadside','backroad',
+      'railroad','crossroad','road','forest','woodland','woode','greenwood',
+      'graveyard','gravesite','cemetery','park','temple','subway','sidewalk'),
+    `Military Setting` = c('military','army','military base','soldier','navy')
+  )
+)
+
+# ── COLOR ─────────────────────────────────────────────────────────────────────
+color_groups <- list(
+  ptt = list(
+    White  = c('白衣','白色','全白','襲白','穿白','褲白鞋','白鞋','白點','白袍','白光','白線','青白','發白','白面','白霧','白布','白影'),
+    Red    = c('紅紙','紅裙','紅影','紅點','紅絲','染紅','紅字畫','紅布','紅褲','發紅','紅線','紅光','血色'),
+    Black  = c('黑影','黑鬼','黑氣','黑色','黑青','烏黑','黑衣服','黑服','全黑','焦黑','黑衣','黑人','發黑','灰黑色','黑霧','黑煙','暗黑','黑面','黑衣人'),
+    Green  = c('綠氣','綠霧','綠衣','綠光','綠綠','陣綠光','草綠服','變綠','青色'),
+    Blue   = c('藍光','藍面','藏青色','鬼火'),
+    Yellow = c('黃衣','黃光'),
+    Pink   = c('粉色'),
+    Brown  = c('褐色','咖啡色'),
+    Grey   = c('灰色','灰白色'),
+    Orange = c('橘色','金色'),
+    Purple = c('紫衣')
+  ),
+  theqoo = list(
+    White  = c('창백','소복','흰색','하얀색','백발'),
+    Red    = c('빨간색','피눈물'),
+    Black  = c('흑색','그림자'),
+    Blue   = c('파란색','도깨비불','파랑색'),
+    Green  = c('초록'),
+    Brown  = c('갈색'),
+    Pink   = c('핑크색'),
+    Grey   = c('회백색','회색'),
+    Purple = c('연보라색')
+  ),
+  reddit = list(
+    White  = c('pale','whiteish','white','colorless'),
+    Red    = c('redheade','reddish','red','bloody','bloodstained','bloodied','blood'),
+    Pink   = c('pink'),
+    Black  = c('darken','dark','darkest','darker','darkness','blacken','blacker','blackness','black','pitch','shadow person','shadow figure','shadows','shadow','shadowy','shadowed'),
+    Grey   = c('grey','gray','greyish','grayish'),
+    Green  = c('green','greenish'),
+    Blue   = c('blue','blueish'),
+    Purple = c('purple'),
+    Brown  = c('brown','brownish')
+  )
+)
+
+# ── HAUNTING METHOD ───────────────────────────────────────────────────────────
+haunting_method_groups <- list(
+  ptt = list(
+    Sound = c('敲打','尖叫','嚎啕大哭','哭泣','叫喚','叫出','狂叫','大叫','大吼大叫',
+      '吠叫','喊叫','哀叫','哭叫','叫住','叫著','嚎叫','呼叫','叫喊','怪叫','吼叫',
+      '狗叫','叫醒','敲門','敲著','敲敲','敲擊','鬼哭','痛哭','哭醒','哭喊','大哭',
+      '爆哭','嘶吼','吼聲','狂吼','怒吼','斯吼','人聲','女聲','低聲','小聲','作聲','輕聲',
+      '大聲','門聲','鍵盤聲','聲音','聲調','高聲','出聲','聲響','彈珠聲','氣聲','鬼聲','鈴聲',
+      '男聲','雜聲','鈴鐺聲','銅鈴聲','翁翁聲','回音','童音','噪音','雜音','氣音','吹口哨','風聲',
+      '唱歌','歌聲','獰笑','發笑','咧嘴一笑','嘻笑','笑容','笑笑','笑著','狂笑','微笑',
+      '奸笑','大笑','冷笑'),
+    Touch = c('抓著','抓出去','抓走','抓痕','抓住','抓到','拉著','拉下去','拉腳','往下拉','猛拍',
+      '拍肩膀','拍打','觸碰','碰觸','碰到','觸摸','撫摸','手摸','摸到','摸摸','摸著','山風','海風',
+      '冷風','狂風','大風','微風','寒風','涼風','推開','推下去','推著','推下'),
+    Visual_Appearance = c('注視','出現','站著','站立','看見','盯著','盯上','對視'),
+    Movement = c('消失','進房','靠窗','跟到','跟來','跟去','跟壓','壓床','壓著',
+      '上樓','下樓','墜樓','跳樓','上頂樓','跳海','落海','打開',
+      '壓制','鬼壓','壓到','被壓','壓住','人壓','壓過','擠壓',
+      '飄出','飄去','飄移','飄起','飄過','飄走','飄動','飄浮','飄著',
+      '飄進','穿越','穿門','穿梭','狂奔','奔跑','跑步','跑掉','飛奔',
+      '附著','依附','附身')
+  ),
+  theqoo = list(
+    Sound = c('휘파람','물소리','노랫소리','소리','목소리','발소리','소리치',
+      '울컥','울리','울음','외치','웃음'),
+    Touch = c('손길','바람','붙잡히','잡히','만지','어루만지','만지작','끌어안','끌려가','밀어내'),
+    Visual_Appearance = c('바라보','돌아보','노려보','지켜보','내려다보','쳐다보','보이다',
+      '나타나','다가서','뒤돌아서'),
+    Movement = c('가위눌리','가위눌림','가위','따라오','누르','따라가','지나가','지나','지나치','사라지',
+      '움직이','뛰쳐나오','뛰어오','뛰어나가','씌이','빙의')
+  ),
+  reddit = list(
+    Sound = c('scream','screaming','voice','disembodied voice','disembodied','shrieking',
+      'shriek','crying','cry','breath','breathing','breathe','laughing','laugher',
+      'laughter','laugh','whistle','sound','sounding','shout','shouting','shouted'),
+    Touch = c('pull','tapping','tap','grab','touch','touching','push','slam','pushing','slamming'),
+    Visual_Appearance = c('watching','reappear','appear','standing','stare','watch','see','unseen','saw'),
+    Movement = c('move','disappear','disappearing','dissappeare','disappearance','following','follow',
+      'walking','walk','vanish','vanishing','float','floated','running','run',
+      'possessed','possess','possession')
+  )
+)
+```
+
+#### 11.2 Core function: article-level presence + Fisher / Chi-square
+
+```{r}
+# Map platform → language for regex boundary logic
+platform_lang <- c(ptt = "zh", theqoo = "ko", reddit = "en")
+
+build_keyword_pattern <- function(keywords, lang) {
+  # Sort by length descending (longer keywords first, avoids partial matches)
+  kws <- unique(trimws(keywords))
+  kws <- kws[order(nchar(kws), decreasing = TRUE)]
+
+  if (lang == "en") {
+    # Word-boundary matching for English
+    parts <- paste0("(?<!\\w)", str_replace_all(kws, "([\\.\\|\\(\\)\\^\\{\\}\\+\\$\\*\\?\\[\\]\\\\])", "\\\\\\1"), "(?!\\w)")
+    regex(paste(parts, collapse = "|"), ignore_case = TRUE)
+  } else {
+    # Plain string matching for CJK (Chinese / Korean)
+    parts <- str_replace_all(kws, "([\\.\\|\\(\\)\\^\\{\\}\\+\\$\\*\\?\\[\\]\\\\])", "\\\\\\1")
+    regex(paste(parts, collapse = "|"))
+  }
+}
+
+run_category_article_tests <- function(ghosts_df, groups_dict, plat_name) {
+  lang <- platform_lang[[plat_name]]
+
+  plat_ghosts <- ghosts_df %>%
+    filter(tolower(trimws(platform)) == tolower(plat_name))
+
+  if (nrow(plat_ghosts) == 0) return(NULL)
+
+  # Use context if available, otherwise sentence
+  if ("context" %in% names(plat_ghosts)) {
+    plat_ghosts <- plat_ghosts %>%
+      mutate(scan_text = if_else(!is.na(context) & trimws(context) != "",
+                                 context, sentence))
+  } else {
+    plat_ghosts <- plat_ghosts %>% mutate(scan_text = sentence)
+  }
+
+  # Base article counts per gender (unique article_id × gender_new)
+  base_articles <- plat_ghosts %>%
+    distinct(article_id, gender_new) %>%
+    count(gender_new, name = "base_n") %>%
+    deframe()
+
+  map_dfr(names(groups_dict), function(cat_name) {
+    kws     <- groups_dict[[cat_name]]
+    pattern <- build_keyword_pattern(kws, lang)
+
+    # Flag rows that match, then get unique (article_id, gender_new) hits
+    hits <- plat_ghosts %>%
+      filter(str_detect(scan_text, pattern)) %>%
+      distinct(article_id, gender_new)
+
+    hit_counts <- hits %>% count(gender_new, name = "hits") %>% deframe()
+
+    f_hits <- unname(hit_counts["Female"]); if (is.na(f_hits)) f_hits <- 0L
+    m_hits <- unname(hit_counts["Male"]);   if (is.na(m_hits)) m_hits <- 0L
+    f_base <- unname(base_articles["Female"]); if (is.na(f_base)) f_base <- 0L
+    m_base <- unname(base_articles["Male"]);   if (is.na(m_base)) m_base <- 0L
+
+    f_nohit <- f_base - f_hits
+    m_nohit <- m_base - m_hits
+
+    # Skip if no hits at all
+    if (f_hits + m_hits == 0) return(NULL)
+
+    ct <- matrix(c(f_hits, m_hits, f_nohit, m_nohit), nrow = 2,
+                 dimnames = list(c("Female", "Male"), c("Hit", "NoHit")))
+
+    # Chi-square first; Fisher fallback if expected < 5
+    chisq_res   <- tryCatch(chisq.test(ct, correct = TRUE), error = function(e) NULL)
+    expected_min <- if (!is.null(chisq_res)) min(chisq_res$expected) else 0
+
+    if (is.null(chisq_res) || expected_min < 5) {
+      fisher_res <- fisher.test(ct)
+      tibble(
+        Platform     = plat_name,
+        Category     = cat_name,
+        Female_Hits  = f_hits, Female_Base = f_base,
+        Male_Hits    = m_hits, Male_Base   = m_base,
+        Female_Pct   = round(f_hits / max(f_base, 1) * 100, 2),
+        Male_Pct     = round(m_hits / max(m_base, 1) * 100, 2),
+        Test_Used    = "Fisher",
+        Chi2         = NA_real_,
+        df           = NA_real_,
+        Expected_Min = expected_min,
+        Odds_Ratio   = fisher_res$estimate,
+        p_value      = fisher_res$p.value
+      )
+    } else {
+      tibble(
+        Platform     = plat_name,
+        Category     = cat_name,
+        Female_Hits  = f_hits, Female_Base = f_base,
+        Male_Hits    = m_hits, Male_Base   = m_base,
+        Female_Pct   = round(f_hits / max(f_base, 1) * 100, 2),
+        Male_Pct     = round(m_hits / max(m_base, 1) * 100, 2),
+        Test_Used    = "Chi-square",
+        Chi2         = unname(chisq_res$statistic),
+        df           = unname(chisq_res$parameter),
+        Expected_Min = expected_min,
+        Odds_Ratio   = (f_hits * m_nohit) / max(m_hits * f_nohit, 1),
+        p_value      = chisq_res$p.value
+      )
+    }
+  })
+}
+```
+
+#### 11.3 Run tests for all three domains
+
+```{r}
+ghosts_for_cat <- mentions_df %>%
+  filter(state_new == "Supernatural",
+         gender_new %in% c("Female", "Male"),
+         !is.na(platform))
+
+# Space
+space_stats <- map_dfr(c("ptt", "theqoo", "reddit"), function(p) {
+  run_category_article_tests(ghosts_for_cat, space_groups[[p]], p)
+}) %>% mutate(Domain = "Space")
+
+# Color
+color_stats <- map_dfr(c("ptt", "theqoo", "reddit"), function(p) {
+  run_category_article_tests(ghosts_for_cat, color_groups[[p]], p)
+}) %>% mutate(Domain = "Color")
+
+# Haunting Method
+method_stats <- map_dfr(c("ptt", "theqoo", "reddit"), function(p) {
+  run_category_article_tests(ghosts_for_cat, haunting_method_groups[[p]], p)
+}) %>% mutate(Domain = "Haunting Method")
+
+cat_stats_all <- bind_rows(space_stats, color_stats, method_stats) %>%
+  mutate(
+    sig = p_to_stars(p_value)
+  )
+
+cat_stats_all
+```
+
+#### 11.4 LaTeX — Space
+
+```{r results='asis'}
+if (nrow(space_stats) > 0) {
+  cat(
+    space_stats %>%
+      mutate(sig = p_to_stars(p_value),
+             across(where(is.numeric), ~round(., 4))) %>%
+      select(Platform, Category, Female_Hits, Female_Base, Female_Pct,
+             Male_Hits, Male_Base, Male_Pct,
+             Test_Used, Chi2, p_value, Odds_Ratio, sig) %>%
+      kbl(format   = "latex",
+          booktabs = TRUE,
+          caption  = "Article-level gender distribution by space category (Fisher's exact test when expected $< 5$).",
+          col.names = c("Platform", "Category",
+                        "$n_F$", "Base$_F$", "\\%$_F$",
+                        "$n_M$", "Base$_M$", "\\%$_M$",
+                        "Test", "$\\chi^2$", "$p$", "OR", "Sig."),
+          escape   = FALSE
+      ) %>%
+      kable_styling(latex_options = c("hold_position", "scale_down")) %>%
+      collapse_rows(columns = 1, valign = "top", latex_hline = "major")
+  )
+}
+```
+
+#### 11.5 LaTeX — Color
+
+```{r results='asis'}
+if (nrow(color_stats) > 0) {
+  cat(
+    color_stats %>%
+      mutate(sig = p_to_stars(p_value),
+             across(where(is.numeric), ~round(., 4))) %>%
+      select(Platform, Category, Female_Hits, Female_Base, Female_Pct,
+             Male_Hits, Male_Base, Male_Pct,
+             Test_Used, Chi2, p_value, Odds_Ratio, sig) %>%
+      kbl(format   = "latex",
+          booktabs = TRUE,
+          caption  = "Article-level gender distribution by color category (Fisher's exact test when expected $< 5$).",
+          col.names = c("Platform", "Category",
+                        "$n_F$", "Base$_F$", "\\%$_F$",
+                        "$n_M$", "Base$_M$", "\\%$_M$",
+                        "Test", "$\\chi^2$", "$p$", "OR", "Sig."),
+          escape   = FALSE
+      ) %>%
+      kable_styling(latex_options = c("hold_position", "scale_down")) %>%
+      collapse_rows(columns = 1, valign = "top", latex_hline = "major")
+  )
+}
+```
+
+#### 11.6 LaTeX — Haunting Method
+
+```{r results='asis'}
+if (nrow(method_stats) > 0) {
+  cat(
+    method_stats %>%
+      mutate(sig = p_to_stars(p_value),
+             across(where(is.numeric), ~round(., 4))) %>%
+      select(Platform, Category, Female_Hits, Female_Base, Female_Pct,
+             Male_Hits, Male_Base, Male_Pct,
+             Test_Used, Chi2, p_value, Odds_Ratio, sig) %>%
+      kbl(format   = "latex",
+          booktabs = TRUE,
+          caption  = "Article-level gender distribution by haunting method (Fisher's exact test when expected $< 5$).",
+          col.names = c("Platform", "Category",
+                        "$n_F$", "Base$_F$", "\\%$_F$",
+                        "$n_M$", "Base$_M$", "\\%$_M$",
+                        "Test", "$\\chi^2$", "$p$", "OR", "Sig."),
+          escape   = FALSE
+      ) %>%
+      kable_styling(latex_options = c("hold_position", "scale_down")) %>%
+      collapse_rows(columns = 1, valign = "top", latex_hline = "major")
+  )
+}
+```
+
+### 12. Word2Vec cosine similarity: Kruskal-Wallis + pairwise Wilcoxon
+
+Cosine similarity is bounded $[-1, 1]$ and typically non-normal, so we use non-parametric tests:
+
+-   **Kruskal-Wallis** $H$ (non-parametric one-way ANOVA) to compare cosine similarity across groups
+-   **Pairwise Wilcoxon rank-sum** (= Mann-Whitney $U$) with BH-FDR correction as post-hoc
+-   **Rank-biserial correlation** $r$ as effect size
+
+#### 12.1 Read Word2Vec results
+
+```{r}
+w2v_all <- read_csv(
+  "results/w2v_thematic_all_platforms.csv",
+  show_col_types = FALSE
+)
+
+# Keep only valid cosine similarity rows
+w2v_valid <- w2v_all %>%
+  filter(neighbour != "[NOT IN VOCAB]", !is.na(cosine_sim))
+
+nrow(w2v_valid)
+```
+
+#### 12.2 Kruskal-Wallis: domains within each platform
+
+```{r}
+kw_by_platform <- w2v_valid %>%
+  group_by(platform) %>%
+  group_modify(~ {
+    groups <- split(.x$cosine_sim, .x$domain)
+    groups <- groups[sapply(groups, length) > 0]
+    if (length(groups) < 2) return(tibble())
+    kw <- kruskal.test(cosine_sim ~ domain, data = .x)
+    tibble(
+      H        = unname(kw$statistic),
+      df       = unname(kw$parameter),
+      p_value  = kw$p.value,
+      n_groups = length(groups),
+      total_n  = sum(sapply(groups, length))
+    )
+  }) %>%
+  ungroup() %>%
+  mutate(sig = p_to_stars(p_value))
+
+kw_by_platform
+```
+
+#### 12.3 Pairwise Wilcoxon: domains within each platform (BH-FDR)
+
+```{r}
+pw_domain_rows <- list()
+for (plat in unique(w2v_valid$platform)) {
+  pdata <- w2v_valid %>% filter(platform == plat)
+  domains <- sort(unique(pdata$domain))
+  if (length(domains) < 2) next
+
+  pairs <- combn(domains, 2, simplify = FALSE)
+  for (pair in pairs) {
+    g1 <- pdata %>% filter(domain == pair[1]) %>% pull(cosine_sim)
+    g2 <- pdata %>% filter(domain == pair[2]) %>% pull(cosine_sim)
+    if (length(g1) < 2 || length(g2) < 2) next
+
+    wt <- wilcox.test(g1, g2, exact = FALSE)
+    u  <- unname(wt$statistic)
+    r_rb <- 1 - (2 * u) / (length(g1) * length(g2))
+
+    pw_domain_rows[[length(pw_domain_rows) + 1]] <- tibble(
+      platform = plat,
+      group_1  = pair[1],
+      group_2  = pair[2],
+      n1       = length(g1),
+      n2       = length(g2),
+      U        = u,
+      p_value  = wt$p.value,
+      r_rb     = round(r_rb, 4)
+    )
+  }
+}
+
+pw_domain_df <- bind_rows(pw_domain_rows) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "BH"),
+    sig   = p_to_stars(p_adj)
+  )
+
+pw_domain_df
+```
+
+#### 12.4 Kruskal-Wallis: platforms within each domain
+
+```{r}
+kw_by_domain <- w2v_valid %>%
+  group_by(domain) %>%
+  group_modify(~ {
+    groups <- split(.x$cosine_sim, .x$platform)
+    groups <- groups[sapply(groups, length) > 0]
+    if (length(groups) < 2) return(tibble())
+    kw <- kruskal.test(cosine_sim ~ platform, data = .x)
+    tibble(
+      H        = unname(kw$statistic),
+      df       = unname(kw$parameter),
+      p_value  = kw$p.value,
+      n_groups = length(groups),
+      total_n  = sum(sapply(groups, length))
+    )
+  }) %>%
+  ungroup() %>%
+  mutate(sig = p_to_stars(p_value))
+
+kw_by_domain
+```
+
+#### 12.5 Pairwise Wilcoxon: platforms within each domain (BH-FDR)
+
+```{r}
+pw_plat_rows <- list()
+for (dom in unique(w2v_valid$domain)) {
+  ddata <- w2v_valid %>% filter(domain == dom)
+  plats <- sort(unique(ddata$platform))
+  if (length(plats) < 2) next
+
+  pairs <- combn(plats, 2, simplify = FALSE)
+  for (pair in pairs) {
+    g1 <- ddata %>% filter(platform == pair[1]) %>% pull(cosine_sim)
+    g2 <- ddata %>% filter(platform == pair[2]) %>% pull(cosine_sim)
+    if (length(g1) < 2 || length(g2) < 2) next
+
+    wt <- wilcox.test(g1, g2, exact = FALSE)
+    u  <- unname(wt$statistic)
+    r_rb <- 1 - (2 * u) / (length(g1) * length(g2))
+
+    pw_plat_rows[[length(pw_plat_rows) + 1]] <- tibble(
+      domain     = dom,
+      platform_1 = pair[1],
+      platform_2 = pair[2],
+      n1         = length(g1),
+      n2         = length(g2),
+      U          = u,
+      p_value    = wt$p.value,
+      r_rb       = round(r_rb, 4)
+    )
+  }
+}
+
+pw_plat_df <- bind_rows(pw_plat_rows) %>%
+  mutate(
+    p_adj = p.adjust(p_value, method = "BH"),
+    sig   = p_to_stars(p_adj)
+  )
+
+pw_plat_df
+```
+
+#### 12.6 LaTeX — Kruskal-Wallis (domains within platform)
+
+```{r results='asis'}
+cat(
+  kw_by_platform %>%
+    mutate(across(where(is.numeric), ~round(., 4))) %>%
+    kbl(format   = "latex",
+        booktabs = TRUE,
+        caption  = "Kruskal-Wallis $H$ tests: cosine similarity across thematic domains within each platform.",
+        col.names = c("Platform", "$H$", "df", "$p$", "$k$", "$N$", "Sig."),
+        escape   = FALSE
+    ) %>%
+    kable_styling(latex_options = c("hold_position"))
+)
+```
+
+#### 12.7 LaTeX — Pairwise Wilcoxon (domains within platform)
+
+```{r results='asis'}
+if (nrow(pw_domain_df) > 0) {
+  cat(
+    pw_domain_df %>%
+      mutate(across(where(is.numeric), ~round(., 4))) %>%
+      select(platform, group_1, group_2, n1, n2, U, p_value, p_adj, r_rb, sig) %>%
+      kbl(format   = "latex",
+          booktabs = TRUE,
+          caption  = "Pairwise Wilcoxon rank-sum tests (BH-FDR): cosine similarity between domains within each platform.",
+          col.names = c("Platform", "Domain 1", "Domain 2",
+                        "$n_1$", "$n_2$", "$U$",
+                        "$p$", "$p_{adj}$", "$r_{rb}$", "Sig."),
+          escape   = FALSE
+      ) %>%
+      kable_styling(latex_options = c("hold_position", "scale_down")) %>%
+      collapse_rows(columns = 1, valign = "top", latex_hline = "major")
+  )
+}
+```
+
+#### 12.8 LaTeX — Kruskal-Wallis (platforms within domain)
+
+```{r results='asis'}
+cat(
+  kw_by_domain %>%
+    mutate(across(where(is.numeric), ~round(., 4))) %>%
+    kbl(format   = "latex",
+        booktabs = TRUE,
+        caption  = "Kruskal-Wallis $H$ tests: cosine similarity across platforms within each thematic domain.",
+        col.names = c("Domain", "$H$", "df", "$p$", "$k$", "$N$", "Sig."),
+        escape   = FALSE
+    ) %>%
+    kable_styling(latex_options = c("hold_position"))
+)
+```
+
+#### 12.9 LaTeX — Pairwise Wilcoxon (platforms within domain)
+
+```{r results='asis'}
+if (nrow(pw_plat_df) > 0) {
+  cat(
+    pw_plat_df %>%
+      mutate(across(where(is.numeric), ~round(., 4))) %>%
+      select(domain, platform_1, platform_2, n1, n2, U, p_value, p_adj, r_rb, sig) %>%
+      kbl(format   = "latex",
+          booktabs = TRUE,
+          caption  = "Pairwise Wilcoxon rank-sum tests (BH-FDR): cosine similarity between platforms within each domain.",
+          col.names = c("Domain", "Platform 1", "Platform 2",
+                        "$n_1$", "$n_2$", "$U$",
+                        "$p$", "$p_{adj}$", "$r_{rb}$", "Sig."),
+          escape   = FALSE
+      ) %>%
+      kable_styling(latex_options = c("hold_position", "scale_down")) %>%
+      collapse_rows(columns = 1, valign = "top", latex_hline = "major")
+  )
+}
+```

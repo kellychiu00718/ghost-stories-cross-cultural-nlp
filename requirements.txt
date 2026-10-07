@@ -1,0 +1,14 @@
+pandas
+numpy
+scipy
+scikit-learn
+statsmodels
+gensim
+spacy
+jieba
+kiwipiepy
+matplotlib
+seaborn
+anthropic
+python-dotenv
+jupyterlab
