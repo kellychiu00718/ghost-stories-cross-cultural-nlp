@@ -21,7 +21,7 @@ Three questions:
 3. Do these differences point to gender structures in each society?
 
 ## My role
-I designed the research, wrote the classification and analysis pipeline, labeled the validation sample, and wrote the thesis. I used Claude Code and Claude as coding assistants and the Claude API as one stage of the classifier (see Process). Design choices, labels and interpretation are mine.
+I designed the research, wrote the classification and analysis pipeline, labeled about 500 stories by hand as the validation standard, and wrote the thesis. I used Claude Code and Claude as coding assistants and the Claude API as one stage of the classifier (see Process). Design choices, labels and interpretation are mine.
 
 ## Data
 | Platform | Language | Posts |
@@ -63,13 +63,14 @@ Python (pandas, scikit-learn, gensim, spaCy, jieba, KoNLPy/Kiwi, statsmodels, sc
 ![White and other colors by ghost gender on PTT](figures/ptt_color_by_ghost_gender.png)
 
 ## Business impact
-This is academic research with no deployment, so there is no business result. The reusable part is the method: a cheap rule layer that handles clear cases, an LLM only for ambiguous ones, and a validation step that checks the combination. The cascade reached gender macro-F1 0.94 (kappa 0.93) and beat the rule-only version on McNemar's exact test (b = 36, c = 6, p < .001).
+This is academic research with no deployment, so there is no business result. On gender, rules alone reached macro-F1 0.88 (kappa 0.83) and the cascade 0.94 (kappa 0.93); McNemar's exact test confirms the gap (b = 36, c = 6, p < .001). The same setup (cheap rules first, an LLM for unclear cases, hand labels to check both) could classify customer reviews or support messages in several languages. I have not tried it on those yet.
 
 ## Challenges and learnings
 - State classification is weaker (macro-F1 0.65, kappa 0.54). Whether a ghost is "deceased" or "supernatural" is often unclear in the text, and the LLM judge agreed with me less on it (kappa 0.33).
 - Gendered words can make the analysis circular, so kinship terms and pronouns are removed from the LLR vocabulary.
 - Three languages need three tokenizers, and each choice shifts the counts. I aligned them and documented the choices.
 - Statistical significance and effect size told different stories (large samples, V near 0.10), so I describe the differences as real but small.
+- Without the hand-labeled sample, I could not have shown that the cascade beat the rules. I now build the check before I trust the classifier.
 
 ## Run it
 ```bash
