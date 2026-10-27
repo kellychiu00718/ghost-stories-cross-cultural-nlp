@@ -28,17 +28,25 @@ The project required working with both texts and numbers. I translated concepts 
 
 ## 3. Data
 
+I wanted to examine how people today describe and make sense of ghosts, so I chose online forums where users share stories anonymously or under pseudonyms. These provide everyday narratives with less editorial filtering than published collections. To keep the scope more comparable, I focused on stories presented as firsthand experiences, using each platform's categories or community rules to select them. “Firsthand experience” describes how the posts are framed; the research examines how the stories are told.
+
 I collected **22,393 public posts** and retained **21,242 usable texts** after removing posts without body text.
 
-| Platform / language | Selection and collection method | Collected posts | Usable texts |
-| --- | --- | --- | --- |
-| PTT / Traditional Chinese | Marvel posts with “experience” in the title; BeautifulSoup4 | 15,759 | 14,610 |
-| TheQoo / Korean | The horror board's “real experience” category; Selenium | 967 | 965 |
-| Reddit / English | Text content from r/Paranormal and r/Ghoststories; PRAW API | 5,667 | 5,667 |
+| Platform / language | Selection and collection method | Post date range | Collected posts | Usable texts |
+| --- | --- | --- | --- | --- |
+| PTT / Traditional Chinese | Marvel posts with “experience” (經驗) in the title; BeautifulSoup4 | 2003-03-09<br />to 2025-09-08 | 15,759 | 14,610 |
+| TheQoo / Korean | The horror board's “real experience” (실제경험담) category; Selenium | 2020-08-18<br />to 2025-04-01 | 967 | 965 |
+| Reddit / English | Text-based accounts of users' paranormal experiences in r/Paranormal and r/Ghoststories; PRAW API | 2024-11-11<br />to 2025-09-08 | 5,667 | 5,667 |
 
-Classification uses **entity mentions**: individual occurrences of a human character or supernatural presence, with the sentence and nearby context. One story can produce several records. The human validation set contains 498 mentions, with 166 from each platform, covering cases the rules labeled Female, Male, and Unknown.
+The collected fields include titles, body text, and source URLs, with the analysis focused on body text. Other users' replies were removed from PTT posts. Posts containing only images or videos, without text to analyze, were excluded from the text corpus.
 
-The platforms cover different periods and user populations, and Reddit is not a direct sample of the US population. The results therefore describe narrative patterns in these platform corpora.
+Classification uses **entity mentions**: individual occurrences of a human character or supernatural presence in a story. I retained the sentence containing each mention and up to two sentences on either side to classify its gender and whether it refers to a living person, someone deceased who is only being mentioned, or a supernatural presence appearing or interacting in the story. Repeated references to the same character can produce several records within one story.
+
+For settings, colors, and haunting methods, I instead examined **whether a theme appeared within an article**, counting each article at most once per gender and theme. This reduces the influence of repeated references to a character in a long story. A story featuring both female and male ghosts can still contribute to both groups.
+
+I also created a **human validation set of 498 entity mentions**, with 166 from each platform, sampled across the rules' initial Female, Male, and Unknown labels. These records were used to assess classification quality; they were not an additional 498 stories.
+
+The platforms differ in their collection periods, corpus sizes, and user populations. Reddit's English-language posts are also not a direct sample of the US population. The results therefore describe narrative patterns in these corpora, and cross-platform differences need to be interpreted within those limits.
 
 ## 4. Tools and Outputs
 
@@ -60,9 +68,52 @@ After classification and validation, I used log-likelihood ratio (LLR) analysis 
 
 ## 6. Key Findings
 
-### ① Adding an LLM improved gender classification, while performance differed by task
+### ① Ghost gender distribution differed across platforms, with a small effect size
 
-I compared rules alone with the rules-plus-LLM workflow on the same 498 human-annotated mentions.
+Among supernatural entity mentions, male ghosts accounted for 51.7% on PTT, compared with 39.4% for female ghosts. On Reddit, female ghosts accounted for 46.5%, slightly above 43.7% for male ghosts. On TheQoo, female ghosts accounted for 33.4% and male ghosts for 16.1%, but **50.5% of mentions had an unknown gender**. That uncertainty needs to be considered alongside the female-to-male proportions.
+
+After excluding Unknown, the association between platform and ghost gender was significant under both mention and article counting, but Cramér’s V was about **0.10**, indicating a small effect. The corpora show different narrative tendencies, but these results are insufficient to treat those tendencies as fixed traits of entire cultures.
+
+![Gender distribution of supernatural entities across three platforms, counting mentions and deduplicating by article and gender](figures/ghost_counts_raw_pipeline.png)
+
+The top row counts mentions. The bottom row counts each article at most once per gender category. An article can contribute to several categories, so the bottom-row percentages do not represent mutually exclusive groups of articles.
+
+In Chapter 5, I drew on stories and the literature to discuss Taiwan's migration history, ancestral worship, and military ghost stories as possible contexts for understanding PTT's higher male-ghost share. These are interpretations of the results; the study did not directly test how much each factor contributed to the gender distribution.
+
+### ② Settings suggest gender roles, with different levels of support across platforms
+
+I used LLR collocate analysis to identify words disproportionately associated with female- or male-ghost contexts. On PTT, male-ghost collocates included “squad leader,” “military service,” and “company commander.” On TheQoo, female-ghost collocates included bedrooms, beds, and sleep-related terms. I then compared the share of articles associated with each ghost gender in which a setting theme appeared.
+
+| Platform / setting | Female-ghost articles | Male-ghost articles | Comparison |
+| --- | --- | --- | --- |
+| PTT: indoor / domestic | 23.56% | 21.65% | p = .0557; did not meet the .05 significance threshold |
+| TheQoo: indoor / domestic | 19.78% | 5.83% | p = .0025; higher among female-ghost articles |
+| Reddit: indoor / domestic | 60.22% | 54.27% | p = .0002; higher among female-ghost articles |
+| PTT: military setting | 2.29% | 4.61% | p < .001; higher among male-ghost articles |
+
+Each percentage uses the corresponding female- or male-ghost article group within that platform as its denominator, following thesis Table 4.10. TheQoo's indoor / domestic result comes from 36 female-ghost articles and 6 male-ghost articles, so the small counts call for caution.
+
+![Words associated with female- and male-ghost contexts across three platforms](figures/collocate_LLR_divergence_3platforms_v5.png)
+
+The bars show relative association with female- or male-ghost contexts, rather than raw word counts. Collocate significance in this figure uses BH-FDR correction for multiple comparisons. The thematic comparisons of settings, colors, and haunting methods use the separate article-level tests reported in the thesis. They do not use the figure's BH-FDR correction and are best treated as exploratory leads for close reading and further validation.
+
+In Chapter 5, I interpreted these results through literature on public/private and inner/outer divisions: homes and bedrooms connect with family roles, while military settings connect with hierarchy, discipline, and male authority. Word2Vec neighbors of military terms and close reading added context involving military law, death, and historical violence. Together, these sources let me discuss how settings carry gender and power relations while retaining differences across platforms. The results do not support a general claim that female ghosts belong at home and male ghosts outside in every culture.
+
+### ③ Similar ghost images can carry different cultural meanings
+
+**White was significantly associated with female ghosts on PTT and Reddit**, but not on TheQoo. Combining Word2Vec with close reading, I used Chapter 5 to examine the different contexts behind these similar images. Korean white-clothed female ghosts connect with mourning clothes, unmarried status, and family belonging; Western White Lady narratives often center on romantic betrayal and loss. Even when the clothing looks similar, its meaning needs to be interpreted through the particular stories and literature.
+
+Red was also significantly associated with female ghosts on PTT (p = .0307). Chapter 5 uses stories about female ghosts in red to discuss how the color can convey resentment and revenge in a particular narrative context, contrasting with its everyday associations with celebration and good fortune. Black, by comparison, showed no significant gender difference on any platform. Some male ghosts are described as dark figures, but this does not establish black as an exclusively male-ghost trait.
+
+**Haunting methods also differed, but gender associations did not extend to every behavior**. Sound appeared in 30.08% of female-ghost articles and 27.05% of male-ghost articles on PTT, and in 32.06% and 27.57%, respectively, on Reddit. Both comparisons were significant; TheQoo's was not. Touch was significantly associated with female ghosts on TheQoo, but this involved only 16 female-ghost articles and 2 male-ghost articles. Visual appearance and movement showed no significant gender differences on any platform, so differences visible in a chart should not all be treated as stable gender patterns.
+
+In Chapter 5, I combined words such as crying and screaming with story examples to interpret some female ghosts' audible presence as a narrative way for suppressed figures to reclaim expression and agency. In another PTT story examined through close reading, a deceased mother helps a gambler win money in exchange for his promise to care for her child, then punishes him after he breaks that promise. She has supernatural power, yet acts as a mother demanding that someone fulfill a caregiving responsibility.
+
+This also connects with the conclusions in Chapters 5 and 6: **people make sense of the unfamiliar through familiar social roles, then give those roles concrete form through appearance, settings, and haunting behavior**. Identities such as mother, unmarried woman, or soldier continue to organize how ghosts are imagined. This is an interpretation combining textual patterns and the literature. The study did not analyze reader responses, so it cannot establish whether reading these stories changes or reinforces readers' views of gender.
+
+### ④ Adding an LLM improved classification, with a gap between gender and state
+
+The narrative analysis first requires identifying who is being mentioned and whether that entity is a supernatural presence. I compared rules alone with the rules-plus-LLM workflow on the same 498 human-annotated mentions.
 
 | Classification task | Rules-only Macro-F1 | Rules + LLM Macro-F1 | Rules + LLM Cohen’s κ |
 | --- | --- | --- | --- |
@@ -71,33 +122,7 @@ I compared rules alone with the rules-plus-LLM workflow on the same 498 human-an
 
 For gender, the cascade corrected 36 errors made by the rules, while introducing errors in 6 cases the rules had classified correctly. A paired exact McNemar test found a significant difference between the workflows (p < .001). This gave me direct evidence of what adding the LLM contributed.
 
-Macro-F1 averages the F1 scores across classes, including Unknown. These results measure classification performance on sampled mentions; they do not mean that 94% of complete stories were classified correctly. State classification remained weaker, which limits the interpretations built on it.
-
-### ② Ghost gender distribution differed across platforms, with a small effect size
-
-Among supernatural entity mentions, male ghosts accounted for 51.7% on PTT, compared with 39.4% for female ghosts. On Reddit, female ghosts accounted for 46.5%, slightly above 43.7% for male ghosts. Female mentions also outnumbered male mentions on TheQoo, but **50.5% of mentions had an unknown gender**.
-
-After excluding Unknown, the association between platform and ghost gender was significant under both mention and article counting, but Cramér’s V was about **0.10**, indicating a small effect. I interpreted this as a difference within the platform corpora, using texts and literature on subjects such as military ghost stories to discuss possible cultural contexts.
-
-![Gender distribution of supernatural entities across three platforms, counting mentions and deduplicating by article and gender](figures/ghost_counts_raw_pipeline.png)
-
-The top row counts mentions. The bottom row counts each article at most once per gender category. An article can contribute to several categories, so the bottom-row percentages do not represent mutually exclusive groups of articles.
-
-### ③ Gender differences also appeared in settings and descriptions, with variation across platforms
-
-LLR collocates revealed differences beyond the gender proportions. On PTT, female-ghost contexts included “white clothing” and “screaming,” while male-ghost contexts included “squad leader,” “military service,” and “company commander.” On TheQoo, female contexts included bedrooms, beds, and sleep-related terms, while male contexts included monks and spirits. I then compared whether themes appeared within articles to examine how these word associations extended to settings and actions.
-
-| Dimension | Findings and scope of interpretation |
-| --- | --- |
-| Indoor / domestic space | Associated with female ghosts on TheQoo and Reddit at conventional significance levels; PTT showed the same direction, but p = .0557 did not meet the .05 threshold |
-| Military settings | More clearly associated with male ghosts on PTT; this does not establish the same pattern on all three platforms |
-| White and sound | Both associated with female ghosts on PTT and Reddit; the corresponding TheQoo comparisons were not significant |
-
-![Words associated with female- and male-ghost contexts across three platforms](figures/collocate_LLR_divergence_3platforms_v5.png)
-
-The bars show relative association with female- or male-ghost contexts, rather than raw word counts. Collocate significance in this figure uses BH-FDR correction for multiple comparisons. The thematic comparisons are reported separately in the thesis's article-level result tables.
-
-These findings allowed me to discuss gender roles through specific settings and descriptions. Migration history, military experience, and religious ideas provide interpretive contexts in the thesis; the statistical analyses do not directly establish them as causes.
+Macro-F1 averages the F1 scores across classes, including Unknown. These results measure classification performance on sampled mentions. The gender score of **0.94** does not mean that 94% of complete stories were classified correctly, or that the entire analysis is 94% accurate. State classification's Macro-F1 of 0.65 remains an important limitation for the subsequent narrative interpretations.
 
 ## 7. Challenges and Lessons
 
@@ -131,7 +156,7 @@ The repository contains research notebooks and selected thesis figures. The raw 
 
 ## Methods and Reported Results
 
-The results below are reported in the 2026 thesis, *Ghost Stories Are Never Just About the Dead: A Cross-Cultural NLP Analysis of Gendered Narrative Patterns*, by Meng-Yu Chiu, supervised by Prof. Juyong Park at KAIST. The corpus counts come from Chapter 3.1; annotation counts from Tables 3.3–3.4; classifier metrics from Tables 4.1–4.5; platform comparisons from Table 4.6; thematic findings from Tables 4.10–4.12.
+The results below are reported in the 2026 thesis, *Ghost Stories Are Never Just About the Dead: A Cross-Cultural NLP Analysis of Gendered Narrative Patterns*, by Meng-Yu Chiu, supervised by Prof. Juyong Park at KAIST. Corpus selection, date ranges, and counts come from Section 3.1; counting units and human validation from Section 3.2 and Tables 3.3–3.4; classifier metrics from Tables 4.1–4.5; gender distributions from Figure 4.1 and Table 4.6; collocates from Figure 4.2 and Table 4.7; thematic comparisons from Tables 4.10–4.12; semantic context from Section 4.8. Cultural interpretations draw on Sections 5.1–5.5, with the broader conclusions and limitations in Sections 6.1–6.3. These interpretations combine textual evidence and prior literature; they are not direct tests of cultural causes or reader effects.
 
 ### Classification and validation
 
