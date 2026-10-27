@@ -8,11 +8,17 @@ For my master's thesis at KAIST's Graduate School of Culture Technology, I analy
 
 [Notion portfolio: 中文 / English](https://app.notion.com/p/1bdfea401f5a81829bd0dd489be61d51)
 
-## 1. Research Questions
+## 1. Research Questions and Motivation
 
-While reading ghost stories from different places, I noticed recurring descriptions: white clothing, long hair, bedrooms, and military settings. I wanted to understand **whether female and male ghosts appear in different settings and are described through different appearances and actions—and whether these differences recur across platforms in different languages**.
+While reading ghost stories on PTT, TheQoo, and Reddit, I noticed that female ghosts in white clothing appeared repeatedly across languages and cultural settings. I wondered why people use similar images to describe unfamiliar beings, and how these stories bring in gender roles and social norms from everyday life.
 
-I broke the question down into ghost gender distribution, space, color, and haunting methods, then used text analysis to examine these narrative patterns. The research first required distinguishing human characters from supernatural presences before examining the relationship between gender and storytelling.
+I approached ghost stories as social representations: people draw on familiar ideas about gender, kinship, and social roles to make sense of death and the unknown. Through a ghost's appearance, setting, and haunting behavior, abstract ideas become something that can be seen, heard, or felt. Studying these recurring details offers a way to understand how gender expectations and social order enter everyday storytelling.
+
+My literature review showed that quantitative studies of folktales and fiction had identified gender biases in appearance, agency, and character relationships. Research on ghosts offered rich interpretations through ethnography, legends, and film. Less systematically examined was whether these gendered descriptions recur across large collections of contemporary online stories, and how their patterns compare across cultural contexts.
+
+Cross-cultural comparison also requires attention to differences. The Western public/private distinction and the East Asian inner/outer distinction both connect gender with space, but have different historical and cultural backgrounds. I chose online forums where users share their own stories to examine contemporary narratives, comparing Traditional Chinese, Korean, and English texts to explore which patterns recur and which need to be understood within their particular contexts.
+
+I therefore focused on **whether female and male ghosts appear in different settings and are described through different appearances and actions, and whether these differences recur across platforms in different languages**. I organized the analysis around ghost gender distribution, space, color, and haunting methods, combining text analysis with close reading and the literature to interpret recurring narrative patterns.
 
 ## 2. My Role and Responsibilities
 
